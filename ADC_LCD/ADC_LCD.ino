@@ -22,10 +22,9 @@
 #include <CircularBuffer.h>    // Circular Buffer library to store voltage samples
 #include <SPI.h>               // SPI Communication Interface
 #include <TFT_eSPI.h>          // LILYGO Specific library, taken from Adafruit GFX
-#include "All_Fonts.h"
-#include <TFT_eWidget.h>  // Widget library
-#include <PNGdec.h>       //PNG decoder library
-#include "Artboard_1.h"   //Contains SSS bit map array for Solid State Systems logo image
+#include "FontsAndImages.h"    // Contains my custom fonts and images
+#include <TFT_eWidget.h>       // Widget library
+#include <PNGdec.h>            //PNG decoder library
 
 /* This is required on ESP32 to put the ISR in IRAM. Define as
 empty for other platforms. Be careful - other platforms may have
@@ -50,7 +49,7 @@ empty for other platforms. Be careful - other platforms may have
 #define debugln(x)
 #endif
 
-TFT_eSPI tft = TFT_eSPI(); // Use hardware SPI
+TFT_eSPI tft = TFT_eSPI();  // Use hardware SPI
 
 //coordinates for various TFT display features (T-Display S3 is 170x320 pixels)
 float ampX = 160;   // display x axist pixel coordinate
@@ -61,70 +60,123 @@ float peakX = 0;    // display x axis pixel coordinate
 float peakY = 170;  // display y axis pixel coordinate
 
 //Variables needed for Solid State Systems compoany Logo LCD display
-PNG png;  // PNG decoder instance
-int16_t xpos = 0; // x-coordinate of logo
-int16_t ypos = 0; // y-coordinate of logo
+PNG png;           // PNG decoder instance
+int16_t xpos = 0;  // x-coordinate of logo
+int16_t ypos = 0;  // y-coordinate of logo
 
 Adafruit_ADS1015 ads;
-char string[50];
-float startTime;
-float endTime;
-float displayTime = 0.11; // Display time variable
+char string[50];      //string to hold display data, non-essential but useful for debugging and logging
 float sensorVal = 0;  // sensorVal
-float ampPeak = 0.00;
-float voltPeak = 0;
-const int SMOOTHING_WINDOW_SIZE = 2890;                     // amount of samples stored. Number chosen for 1 seconds worth of samples. Sampling rate: 1450 samples/sec
-bool startOn_dft = 0;                                       //timer start for another time
-bool refresh = 0;                                           //Refresh status
-const int SENS_SIZE = 10;                                   //size of array that checks for consistent voltage above threshold sensitivity
-CircularBuffer<float, SENS_SIZE> sensBuffer;                //Buffer that checks filters out rare bad readings from good readings
-CircularBuffer<float, SMOOTHING_WINDOW_SIZE> windowBuffer;  //Buffer that checks filters out rare bad readings from good readings
-CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *windowBufferptr = &windowBuffer;
-
-// Structure containing all data used to capture and modify the signal data
-struct SignalMods {
-
-  int sensorCount = 0;             // tracking amount of data counted for use in capture/sec data
-  const int front_trunc = 0;       // amount of samples truncated at the beginning part of the array storing sensor values.
-  const int back_trunc = 0;        // amount of samples truncated at the end part of the array storing sensor values.
-  const int back_sort_trunc = 20;  // amount of samples truncated at the end part of the sorted array
-  int sens = 5;                    // input sensitivity
-  int exit_sens = 2;
-  float latency = 0.0;  //0 ms latency (customizable)
-  float counting_rate = 0;
-
-} wave;
-
+bool refresh = 0;     //Refresh status
+  const int SMOOTHING_WINDOW_SIZE = 2890;                     // amount of samples stored. Number chosen for 1 seconds worth of samples. Sampling rate: 1450 samples/sec
+  const int SENS_SIZE = 10;                                   //size of array that checks for consistent voltage above threshold sensitivity
 
 //Function used in the qsort function argument. Customize it based on what the size of the data type and if you want ascending sort or descending sort
 int comp(const void *elem1, const void *elem2);
 
-//Function draws png for company logo
+// Structure containing all data used to capture and modify the signal data
+class SignalInfo {
+
+private:
+
+public:
+
+  float startTime;
+  float endTime;
+  float displayTime = 0.11;        // Display time variable
+  int sensorCount = 0;             // tracking amount of data counted for use in capture/sec data
+  const int front_trunc = 0;       // amount of samples truncated at the beginning part of the array storing sensor values.
+  const int back_trunc = 0;        // amount of samples truncated at the end part of the array storing sensor values.
+  const int back_sort_trunc = 20;  // amount of samples truncated at the end part of the sorted array
+  int enter_sens = 5;              // input sensitivity
+  int exit_sens = 2;
+  float latency = 0.0;  //0 ms latency (customizable)
+  float counting_rate = 0;
+  float ampPeak = 0.00;
+  float voltPeak = 0;
+  CircularBuffer<float, SENS_SIZE> sensBuffer;                //Buffer that checks filters out rare bad readings from good readings
+  CircularBuffer<float, SMOOTHING_WINDOW_SIZE> windowBuffer;  //Buffer that checks filters out rare bad readings from good readings
+  CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *windowBufferptr = &windowBuffer;
+
+
+  //Prints values inside window buffer
+  void print_buffer_array() {
+    for (int i = 0; i < windowBuffer.size(); ++i) {
+      sprintf(string, "Array Value[%d] = %.0f", i, windowBuffer[i]);
+      Serial.println(string);
+    }
+  }
+
+  /* Returns boolean of whether sensor values are below exit threshold or not
+ Used to determine when signal has ended */
+  bool SignalEnd() {
+    if (abs(sensBuffer[0]) < exit_sens && abs(sensBuffer[1]) < exit_sens && abs(sensBuffer[2]) < exit_sens && abs(sensBuffer[3]) < exit_sens && abs(sensBuffer[4]) < exit_sens && abs(sensBuffer[5]) < exit_sens && abs(sensBuffer[6]) < exit_sens && abs(sensBuffer[7]) < exit_sens) {
+      return true;
+    }
+    return false;
+  }
+
+  /* Returns boolean of whether sensor values are above enter threshold or not
+ Used to determine when signal has started */
+  bool SignalBegin() {
+    if (abs(sensBuffer[0]) > enter_sens && abs(sensBuffer[1]) > enter_sens) {
+      return true;
+    }
+    return false;
+  }
+
+/* Corrects display time from being too long due to while loop not exiting correctly
+ Takes an array pointer as an argument, peak value, and sampling rate
+ Reverse iterates through the array until peak value is reached, counts how many elements
+ it iterated through then subtracts that from display time */
+//=========================================v==========================================
+float correct_time() {
+  int iterate_count = 0;
+  for (int i = (windowBuffer.size() - 1); i > 1; --i) {
+    //if value is greater than 90% of peak value, break out of for loop
+    if (windowBuffer[i] > (.9 * voltPeak)) {
+      break;
+    }
+    iterate_count++;
+  }
+  return (displayTime - iterate_count / counting_rate);
+}
+
+//Takes in circular buffer of graph points and returns the peak of the buffer
+float peak_detector() {
+  float max = 0;
+  CircularBuffer<float, SMOOTHING_WINDOW_SIZE> newBuffer;
+  CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *newBufferptr = &newBuffer;
+  for (int i = front_trunc; i < ((windowBuffer.size()) - back_trunc); ++i) {
+    newBuffer.push(windowBuffer[i]);
+  }
+
+  qsort(newBufferptr, (*newBufferptr).size(), sizeof(float), comp);  //qsort has strange bug where last entry in array is not sorted
+  max = newBuffer[newBuffer.size() - 2 - back_sort_trunc];                  // - 1 for index starting at 0 and -1 for qsort bug mentioned in above comment
+  (*newBufferptr).clear();
+  debug("max: ");
+  debugln(max);
+  return max;
+}
+} wave;
+
+
+
+
+//Draws png for company logo
 void pngDraw(PNGDRAW *pDraw);
 
-//-------------------TFT DISPLAY-------------------------
+//LCD Text Display functions
 void amp_display(const GFXfont *font);
 void time_display(const GFXfont *font);
 void peak_display(const GFXfont *font);
 
-
-//function that corrects display time from being too long due to while loop not exiting correctly
-//Takes an array pointer as an argument, peak value, and sampling rate
-//Reverse iterates through the array until peak value is reached, counts how many elements it iterated through then subtracts that from display time
-float correct_time(CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *arr, float peak_value, float samp_rate, float time);
-//Prints values inside array
-void print_buffer_array(CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *arr);
 
 //interrupt that will call reconfigure function
 void IRAM_ATTR CONFIG_INTERRUPT();
 //read the dip switches and change the multiplier of the voltage to amps based on the dip switch readings
 void reconfigure();
 
-//function that takes in circuilar buffer of graph points and returns the peak of the buffer
-float peak_detector(CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *Buffer, int front, int back, int sort_cut);
-
-//function that returns boolean of whether sensor values are below threshold or not
-bool isBelowExitSensitivity(CircularBuffer<float, SENS_SIZE> *tempBuffer, int temp_exit_sens);
 
 // Core definitions (Used for dual-core ESP32)
 static const BaseType_t pro_cpu = 0;  // Core 0
@@ -144,9 +196,9 @@ void doTask0(void *parameters) {
   while (1) {
 
     sensorVal = (float)ads.getLastConversionResults();  // polling for sensor values to see when there is actually significant voltage (voltage above the threshold value)
-    sensBuffer.push(sensorVal);                         //store sensor values into a circular buffer of sensor values
-    startTime = millis();
-    if (abs(sensBuffer[0]) > wave.sens && abs(sensBuffer[1]) > wave.sens) {
+    wave.sensBuffer.push(sensorVal);                    //store sensor values into a circular buffer of sensor values
+    wave.startTime = millis();
+    if (wave.SignalBegin()) {
       Serial.println("Enter Loop");
       while (1) {
         sensorVal = (float)ads.getLastConversionResults();  // polling for sensor values to see when there is actually significant voltage (voltage above the threshold value)
@@ -154,32 +206,32 @@ void doTask0(void *parameters) {
 
         Serial.print("Counting sensors in while loop: ");
         Serial.println(wave.sensorCount);
-        sensBuffer.push(abs(sensorVal));
-        if (abs(sensorVal) > wave.sens) {
-          windowBuffer.push(abs(sensorVal));
+        wave.sensBuffer.push(abs(sensorVal));
+        if (abs(sensorVal) > wave.enter_sens) {
+          wave.windowBuffer.push(abs(sensorVal));
         }
         Serial.print("sensorVal:");
         Serial.println(sensorVal);
         // if newest ADC readings below a certain sensitivity then end capture
-        if (isBelowExitSensitivity(&sensBuffer, wave.exit_sens)) {
+        if (wave.SignalEnd()) {
 
-          endTime = millis();
-          displayTime = ((endTime - startTime) / 1000) + wave.latency;
+          wave.endTime = millis();
+          wave.displayTime = ((wave.endTime - wave.startTime) / 1000) + wave.latency;
 
 
 
-          print_buffer_array(windowBufferptr);
-          voltPeak = (peak_detector(windowBufferptr, wave.front_trunc, wave.back_trunc, wave.back_sort_trunc));
-          ampPeak = mVtoAmp(voltPeak);
+          wave.print_buffer_array();
+          wave.voltPeak = wave.peak_detector();
+          wave.ampPeak = mVtoAmp(wave.voltPeak);
           refresh = 1;
-          windowBufferptr->clear(); // Clears buffer so it doesn't have left over values
+          wave.windowBuffer.clear();  // Clears buffer so it doesn't have left over values
           Serial.println("Exited While Loop");
           Serial.print("Real Time: ");
-          Serial.println(displayTime - wave.latency);
+          Serial.println(wave.displayTime - wave.latency);
           break;
         }
       }
-      wave.counting_rate = wave.sensorCount / (displayTime - wave.latency);
+      wave.counting_rate = wave.sensorCount / (wave.displayTime - wave.latency);
       Serial.print("The counting rate is: ");
       Serial.println(wave.counting_rate);
       wave.sensorCount = 0;
@@ -192,23 +244,22 @@ void doTask1(void *parameters) {
 
   // Do forever
   while (1) {
-    vTaskDelay(500/portTICK_PERIOD_MS);
+    vTaskDelay(500 / portTICK_PERIOD_MS);
     if (refresh == 1) {
       tft.fillScreen(TFT_BLACK);  // Clear screen
 
       // if amp display more than 4 digits then change font size to smaller size
-      if (ampPeak > 9999) {
-        amp_display(AMPFONT); // displays amp in top center of LCD
+      if (wave.ampPeak > 9999) {
+        amp_display(AMPFONT);  // displays amp in top center of LCD
       } else {
-        amp_display(AMPFONT70); // displays amps in top center of LCD
+        amp_display(AMPFONT70);  // displays amps in top center of LCD
       }
 
-      time_display(TIMEFONT); //displays time in bottom right of LCD
-      peak_display(TIMEFONT); // displays voltage in bottom left of LCD
+      time_display(TIMEFONT);  //displays time in bottom right of LCD
+      peak_display(TIMEFONT);  // displays voltage in bottom left of LCD
 
       refresh = 0;
     }
-
   }
 }
 
@@ -216,7 +267,7 @@ void doTask1(void *parameters) {
 // Main (runs as its own task with priority 1 on core 1)
 
 void setup() {
-  
+
 
   pinMode(15, OUTPUT);  // to boot with battery...
   digitalWrite(15, 1);  // and/or power from 5v rail instead of USB
@@ -234,7 +285,7 @@ void setup() {
   tft.setTextColor(TFT_WHITE);   // Sets text color to white
   Wire.begin(I2C_SDA, I2C_SCL);  // Initializes communication with ADC
   for (int i = 0; i < SENS_SIZE; ++i) {
-    sensBuffer.push(0);
+    wave.sensBuffer.push(0);
   }
   if (!ads.begin()) {
     while (1) {
@@ -312,23 +363,18 @@ int comp(const void *elem1, const void *elem2) {
   return 0;
 }
 
-//===================================================================================
-//--------------------pngDraw------------------------------
-//===================================================================================
-// This next function will be called during decoding of the png file to
-// render each image line to the TFT.  If you use a different TFT library
-// you will need to adapt this function to suit.
-// Callback function to draw pixels to the display
+
+/*
+ PNG function taken from example libraries
+ This next function will be called during decoding of the png file to
+ render each image line to the TFT.  If you use a different TFT library
+ you will need to adapt this function to suit.
+ Callback function to draw pixels to the display */
 void pngDraw(PNGDRAW *pDraw) {
   uint16_t lineBuffer[MAX_IMAGE_WDITH];
   png.getLineAsRGB565(pDraw, lineBuffer, PNG_RGB565_BIG_ENDIAN, 0xffffffff);
   tft.pushImage(xpos, ypos + pDraw->y, pDraw->iWidth, 1, lineBuffer);
 }
-
-
-//=========================================v==========================================
-//-------------------TFT DISPLAY-------------------------
-//=========================================v==========================================
 
 // Function that displays current at top center of LCD
 void amp_display(const GFXfont *font) {
@@ -336,7 +382,7 @@ void amp_display(const GFXfont *font) {
   tft.setTextColor(TFT_RED);           //Sets color of text to red
   tft.setFreeFont(font);               // Selects the font
   tft.setTextDatum(TC_DATUM);          // Adjusts reference point of text generation to top center
-  sprintf(string, "%.0f", ampPeak);    // stores peak amp value into string to be printed to LCD
+  sprintf(string, "%.0f", wave.ampPeak);    // stores peak amp value into string to be printed to LCD
   tft.drawString(string, ampX, ampY);  // Print the test text in the custom font
 }
 
@@ -346,10 +392,10 @@ void time_display(const GFXfont *font) {
   tft.setTextColor(TFT_WHITE);                                                                               // Sets color of text to white
   tft.setFreeFont(font);                                                                                     // Selects the font
   tft.setTextDatum(BR_DATUM);                                                                                //Adjusts reference point of text generation to bottom right
-  sprintf(string, "%.2f%s", correct_time(windowBufferptr, voltPeak, wave.counting_rate, displayTime), "s");  // stores corrected time value into string to be printed to LCD
+  sprintf(string, "%.2f%s", wave.correct_time(), "s");  // stores corrected time value into string to be printed to LCD
 
   //Check that corrected time is above 0 seconds. If time negative then print N/A instead
-  if (correct_time(windowBufferptr, voltPeak, wave.counting_rate, displayTime) > 0) {
+  if (wave.correct_time() > 0) {
     tft.drawString(string, timeX, timeY);  // prints string to LCD screen
   } else {
     tft.drawString("N/A", timeX, timeY);  // prints string to LCD screen
@@ -362,7 +408,7 @@ void peak_display(const GFXfont *font) {
   tft.setTextColor(TFT_WHITE);                // Sets color of text to white
   tft.setFreeFont(font);                      // Select the font
   tft.setTextDatum(BL_DATUM);                 // Adjusts reference point of text generation to bottom left
-  sprintf(string, "%.0f%s", voltPeak, "mv");  // stores voltage peak into string to be printed to LCD
+  sprintf(string, "%.0f%s", wave.voltPeak, "mv");  // stores voltage peak into string to be printed to LCD
   tft.drawString(string, peakX, peakY);       // prints string to LCD screen
 }
 
@@ -373,37 +419,16 @@ float mVtoAmp(float x) {
   return amp_convert * 1000;
 }
 
-//function that corrects display time from being too long due to while loop not exiting correctly
-//Takes an array pointer as an argument, peak value, and sampling rate
-//Reverse iterates through the array until peak value is reached, counts how many elements it iterated through then subtracts that from display time
-//=========================================v==========================================
-float correct_time(CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *arr, float peak_value, float samp_rate, float time) {
-  int iterate_count = 0;
-  for (int i = ((*arr).size() - 1); i > 1; --i) {
-    //if value is greater than 90% of peak value, break out of for loop
-    if ((*arr)[i] > (.9 * peak_value)) {
-      break;
-    }
-    iterate_count++;
-  }
-  return (time - iterate_count / samp_rate);
-}
-//Prints values inside array
-void print_buffer_array(CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *arr) {
-  for (int i = 0; i < (*arr).size(); ++i) {
-    sprintf(string, "Array Value[%d] = %.0f", i, (*arr)[i]);
-    Serial.println(string);
-  }
-}
+
 
 //===================================================================================
 //-------------------DIP SWITCH RECONFIGURATION-------------------------
 //===================================================================================
-//interrupt that will call reconfigure function
+// interrupt that will call reconfigure function
 void IRAM_ATTR CONFIG_INTERRUPT() {
   reconfigure();
 }
-//read the dip switches and change the multiplier of the voltage to amps based on the dip switch readings
+// read the dip switches and change the multiplier of the voltage to amps based on the dip switch readings
 void reconfigure() {
   int mtp[4];    //array for storing multiplexer DIP SWITCH values. Used to configure start up settings like what the multiplier value will be
   int amp = 20;  //the multiplier to convert mV to Amps
@@ -423,39 +448,4 @@ void reconfigure() {
 }
 
 
-//===================================================================================
-//-------------------AMP OUTPUT CALCULATION-------------------------
-//===================================================================================
-//function that takes in circular buffer of graph points and returns the peak of the buffer
-float peak_detector(CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *Buffer, int front, int back, int sort_cut) {
-  float max = 0;
-  CircularBuffer<float, SMOOTHING_WINDOW_SIZE> newBuffer;
-  CircularBuffer<float, SMOOTHING_WINDOW_SIZE> *newBufferptr = &newBuffer;
-  for (int i = front; i < (((*Buffer).size()) - back); ++i) {
-    newBuffer.push((*Buffer)[i]);
-  }
-
-  qsort(newBufferptr, (*newBufferptr).size(), sizeof(float), comp);  //qsort has strange bug where last entry in array is not sorted
-  max = newBuffer[newBuffer.size() - 2 - sort_cut];                  // - 1 for index starting at 0 and -1 for qsort bug mentioned in above comment
-  (*newBufferptr).clear();
-  debug("max: ");
-  debugln(max);
-
-  return max;
-}
-
-//function that returns boolean of whether sensor values are below threshold or not
-bool isBelowExitSensitivity(CircularBuffer<float, SENS_SIZE> *tempBuffer, int temp_exit_sens) {
- if(abs((*tempBuffer)[0]) < temp_exit_sens &&
-    abs((*tempBuffer)[1]) < temp_exit_sens &&
-    abs((*tempBuffer)[2]) < temp_exit_sens &&
-    abs((*tempBuffer)[3]) < temp_exit_sens &&
-    abs((*tempBuffer)[4]) < temp_exit_sens &&
-    abs((*tempBuffer)[5]) < temp_exit_sens &&
-    abs((*tempBuffer)[6]) < temp_exit_sens &&
-    abs((*tempBuffer)[7]) < temp_exit_sens) {
-    return true;
-}
-    return false;
-}
 
